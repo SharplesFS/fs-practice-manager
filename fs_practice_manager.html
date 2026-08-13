@@ -1,0 +1,1392 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>FS Accountants – Practice Manager</title>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.5/babel.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    body { margin: 0; padding: 0; font-family: "Inter", "Segoe UI", system-ui, sans-serif; }
+    textarea { font-family: inherit; }
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #f1f5f9; }
+    ::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #94a3b8; }
+    @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.3; } }
+</style>
+</head>
+<body>
+  <div id="root"></div>
+  <script type="text/babel">
+const { useState, useEffect, useRef, useMemo } = React;
+
+const RAW_DATA = [];
+
+const WORKFLOW = {
+  AP: [
+    { step: 0,  label: "Pending" },
+    { step: 1,  label: "Job Requested" },
+    { step: 2,  label: "Books In" },
+    { step: 3,  label: "Allocated but not started" },
+    { step: 4,  label: "Accounts Started" },
+    { step: 5,  label: "Passed to Manager for Review" },
+    { step: 6,  label: "Reviewed - with Preparer for Adjustments" },
+    { step: 7,  label: "Waiting for Meeting" },
+    { step: 8,  label: "Accounts Finalised" },
+    { step: 9,  label: "Bound Accounts Sent to Client" },
+    { step: 10, label: "Signed Final Accounts Returned by Client" },
+    { step: 11, label: "Electronic Accounts Submitted ✓", complete: true },
+  ],
+  PT: [
+    { step: 0,  label: "Pending" },
+    { step: 1,  label: "Checklist Sent to Client" },
+    { step: 2,  label: "Information Received from Client" },
+    { step: 3,  label: "Allocated but not Started" },
+    { step: 4,  label: "Figures Transferred from IRIS Business Tax" },
+    { step: 5,  label: "Work In Progress" },
+    { step: 6,  label: "Interim Tax Computation Prepared" },
+    { step: 7,  label: "Internet Tax Return Prepared" },
+    { step: 8,  label: "Tax Return Sent to Client for Approval" },
+    { step: 9,  label: "Approval Received from Client" },
+    { step: 10, label: "Final Internet Return Transmitted ✓", complete: true },
+  ],
+  CT: [
+    { step: 0, label: "Pending" },
+    { step: 1, label: "Interim Tax Computation Prepared" },
+    { step: 2, label: "Accounts iXBRL Finalised" },
+    { step: 3, label: "iXBRL Copy of Accounts Created" },
+    { step: 4, label: "Final Internet Return Prepared" },
+    { step: 5, label: "Tax Return Sent to Client for Approval" },
+    { step: 6, label: "Approval Received from Client" },
+    { step: 7, label: "Final Internet Return Transmitted ✓", complete: true },
+    { step: 8, label: "Payment of Tax" },
+  ],
+  ST:  [{ step: 0, label: "Pending" }, { step: 1, label: "In Progress" }, { step: 99, label: "Submitted to HMRC ✓", complete: true }],
+  PAT: [{ step: 0, label: "Pending" }, { step: 1, label: "In Progress" }, { step: 99, label: "Submitted to HMRC ✓", complete: true }],
+  AR:  [{ step: 0, label: "Pending" }, { step: 1, label: "In Progress" }, { step: 99, label: "Filed at Companies House ✓", complete: true }],
+  P11D:[{ step: 0, label: "Pending" }, { step: 1, label: "In Progress" }, { step: 99, label: "Submitted to HMRC ✓", complete: true }],
+  EMI: [{ step: 0, label: "Pending" }, { step: 1, label: "In Progress" }, { step: 99, label: "Submitted to HMRC ✓", complete: true }],
+};
+
+const COMPLETE_STEPS = {
+  AP: 11, PT: 10, CT: 7,
+  ST: 5, PAT: 5, AR: 2, P11D: 4, EMI: 2,
+};
+
+function parseStatus(statusStr) {
+  if (!statusStr || statusStr === "PENDING") return 0;
+  const m = statusStr.match(/^(\d+)\./);
+  if (m) return parseInt(m[1]);
+  return 0;
+}
+
+function parseStatusDate(statusStr) {
+  if (!statusStr) return null;
+  const m = statusStr.match(/\[(\d{2}\/\d{2}\/\d{4})\s/);
+  return m ? m[1] : null;
+}
+
+function parseStatusUser(statusStr) {
+  if (!statusStr) return null;
+  const m = statusStr.match(/\[\d{2}\/\d{2}\/\d{4}\s+(\S+)\]/);
+  return m ? m[1] : null;
+}
+
+function parseDate(str) {
+  if (!str) return null;
+  const parts = str.split("/");
+  if (parts.length !== 3) return null;
+  return new Date(parseInt(parts[2]), parseInt(parts[1]) - 1, parseInt(parts[0]));
+}
+
+function formatDate(str) {
+  if (!str) return "—";
+  return str;
+}
+
+const TODAY = new Date();
+TODAY.setHours(0, 0, 0, 0);
+
+function daysUntil(dateStr) {
+  const d = parseDate(dateStr);
+  if (!d) return null;
+  return Math.round((d - TODAY) / (1000 * 60 * 60 * 24));
+}
+
+function deadlineClass(days) {
+  if (days === null) return "";
+  if (days < 0) return "overdue";
+  if (days <= 30) return "urgent";
+  if (days <= 60) return "warning";
+  return "ok";
+}
+
+function isComplete(job) {
+  const type = job["Job Type"];
+  const completeStep = COMPLETE_STEPS[type];
+  if (completeStep === undefined) return false;
+  return parseStatus(job.Status) >= completeStep;
+}
+
+function pct(a, b) { return b === 0 ? 0 : Math.round((a / b) * 100); }
+
+function isJobComplete(job) {
+  const type = job["Job Type"];
+  const completeStep = COMPLETE_STEPS[type];
+  if (completeStep === undefined) return false;
+  return parseStatus(job.Status) >= completeStep;
+}
+
+function getStepLabel(job) {
+  const wf = WORKFLOW[job["Job Type"]];
+  if (!wf) return job.Status || "Pending";
+  const step = parseStatus(job.Status);
+  const found = wf.find(s => s.step === step);
+  const label = found ? found.label : (job.Status || "Pending");
+  const user = parseStatusUser(job.Status);
+  const date = parseStatusDate(job.Status);
+  if (user && date && step > 0) return label + " — " + date + " " + user;
+  return label;
+}
+
+// Just the stage label without date/user (for compact displays)
+function getStepLabelShort(job) {
+  const wf = WORKFLOW[job["Job Type"]];
+  if (!wf) return job.Status || "Pending";
+  const step = parseStatus(job.Status);
+  const found = wf.find(s => s.step === step);
+  return found ? found.label : (job.Status || "Pending");
+}
+
+const JOB_COLORS = {
+  AP: "#2563eb",
+  CT: "#7c3aed",
+  PT: "#0891b2",
+  ST: "#059669",
+  PAT: "#d97706",
+  AR: "#64748b",
+  P11D: "#db2777",
+  EMI: "#dc2626",
+};
+
+const JOB_LABELS = {
+  AP: "Accounts",
+  CT: "Corp Tax",
+  PT: "Personal Tax",
+  ST: "Sole Trade Tax",
+  PAT: "Partnership Tax",
+  AR: "Annual Return",
+  P11D: "P11D",
+  EMI: "EMI Return",
+};
+
+function App() {
+  const [data, setData] = useState(() => {
+    try {
+      const saved = localStorage.getItem("fspm_jobdata_v1");
+      if (saved) {
+        const parsed = JSON.parse(saved);
+        if (Array.isArray(parsed) && parsed.length > 0) return parsed;
+      }
+    } catch {}
+    return RAW_DATA;
+  });
+  const [dataSource, setDataSource] = useState(() => {
+    try {
+      const meta = localStorage.getItem("fspm_jobmeta_v1");
+      return meta ? JSON.parse(meta) : { source: "embedded", filename: "Built-in data (June 2026)", count: RAW_DATA.length };
+    } catch { return { source: "embedded", filename: "Built-in data (June 2026)", count: RAW_DATA.length }; }
+  });
+  const [activeTab, setActiveTab] = useState("dashboard");
+  const [filterType, setFilterType] = useState("all");
+  const [filterPartner, setFilterPartner] = useState("all");
+  const [filterStatus, setFilterStatus] = useState("all");
+  const [search, setSearch] = useState("");
+  const [sortField, setSortField] = useState("Stat. D/Line");
+  const [sortAsc, setSortAsc] = useState(true);
+  const fileInputRef = useRef(null);
+  const [uploadMsg, setUploadMsg] = useState("");
+  const [selectedJobType, setSelectedJobType] = useState("AP");
+  const [notes, setNotes] = useState({});
+  const [notesLoading, setNotesLoading] = useState(true);
+  const [notesSaving, setNotesSaving] = useState(false);
+  const [editingNote, setEditingNote] = useState(null);
+  const [editingVal, setEditingVal] = useState("");
+  const pollRef = useRef(null);
+
+  // Detect whether shared cloud storage is available (Claude artifact environment)
+  const [allocations, setAllocations] = useState({});
+  const [editingAlloc, setEditingAlloc] = useState(null);
+  const [editingAllocVal, setEditingAllocVal] = useState("");
+  const noteInputRef = useRef(null);
+
+  // JSONBin shared sync — two bins: one for notes/allocs, one for job data
+  const MASTER_KEY = '$2a$10$CSRfO/XHaB9IN1ip0jts/OB5i25fcgB8kYHljMdvmwbH6z/bKqx8K';
+  const notesBinRef = useRef(localStorage.getItem('fspm_notes_bin') || '6a7d8cd1da38895dfeded2b6');
+  const jobsBinRef  = useRef(localStorage.getItem('fspm_jobs_bin')  || '6a7d8cd2da38895dfeded2b7');
+  const [syncStatus, setSyncStatus] = React.useState('loading');
+  const [syncLabel,  setSyncLabel]  = React.useState('Connecting…');
+
+  async function ensureBinFor(binRef, storageKey, name, initData) {
+    if (binRef.current) return true;
+    try {
+      const r = await fetch('https://api.jsonbin.io/v3/b', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'X-Master-Key': MASTER_KEY, 'X-Bin-Name': name, 'X-Bin-Private': 'false' },
+        body: JSON.stringify(initData)
+      });
+      const d = await r.json();
+      binRef.current = d.metadata.id;
+      localStorage.setItem(storageKey, binRef.current);
+      return true;
+    } catch(e) { setSyncStatus('err'); setSyncLabel('Offline'); return false; }
+  }
+
+  async function loadFromCloud() {
+    const notesOk = await ensureBinFor(notesBinRef, 'fspm_notes_bin', 'fspm-notes-allocs', { notes: {}, allocations: {} });
+    const jobsOk  = await ensureBinFor(jobsBinRef,  'fspm_jobs_bin',  'fspm-job-data',     { jobData: [], jobMeta: null });
+    setSyncStatus('loading'); setSyncLabel('Syncing…');
+    try {
+      if (notesOk) {
+        const r = await fetch('https://api.jsonbin.io/v3/b/' + notesBinRef.current + '/latest', { headers: { 'X-Master-Key': MASTER_KEY } });
+        const d = await r.json();
+        const cloudNotes  = d.record.notes       || {};
+        const cloudAllocs = d.record.allocations || {};
+        setNotes(cloudNotes);
+        setAllocations(cloudAllocs);
+        try { localStorage.setItem('fspm_notes_v1', JSON.stringify(cloudNotes)); localStorage.setItem('fspm_alloc_v1', JSON.stringify(cloudAllocs)); } catch(e) {}
+      }
+      if (jobsOk) {
+        const r2 = await fetch('https://api.jsonbin.io/v3/b/' + jobsBinRef.current + '/latest', { headers: { 'X-Master-Key': MASTER_KEY } });
+        const d2 = await r2.json();
+        const cloudJobs = d2.record.jobData || [];
+        const cloudMeta = d2.record.jobMeta || null;
+        if (cloudJobs.length > 0) {
+          setData(cloudJobs);
+          if (cloudMeta) setDataSource(cloudMeta);
+          try { localStorage.setItem('fspm_jobdata_v1', JSON.stringify(cloudJobs)); if (cloudMeta) localStorage.setItem('fspm_jobmeta_v1', JSON.stringify(cloudMeta)); } catch(e) {}
+        }
+      }
+      setSyncStatus('ok'); setSyncLabel('Synced');
+    } catch(e) { setSyncStatus('err'); setSyncLabel('Sync failed'); }
+    setNotesLoading(false);
+  }
+
+  async function saveToCloud(nextNotes, nextAllocs) {
+    try { localStorage.setItem('fspm_notes_v1', JSON.stringify(nextNotes)); localStorage.setItem('fspm_alloc_v1', JSON.stringify(nextAllocs)); } catch(e) {}
+    if (!await ensureBinFor(notesBinRef, 'fspm_notes_bin', 'fspm-notes-allocs', { notes: {}, allocations: {} })) return;
+    try {
+      setSyncStatus('loading'); setSyncLabel('Saving…');
+      await fetch('https://api.jsonbin.io/v3/b/' + notesBinRef.current, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-Master-Key': MASTER_KEY },
+        body: JSON.stringify({ notes: nextNotes, allocations: nextAllocs })
+      });
+      setSyncStatus('ok'); setSyncLabel('Saved ✓');
+    } catch(e) { setSyncStatus('err'); setSyncLabel('Save failed'); }
+  }
+
+  async function saveJobDataToCloud(rows, filename, count) {
+    if (!await ensureBinFor(jobsBinRef, 'fspm_jobs_bin', 'fspm-job-data', { jobData: [], jobMeta: null })) return;
+    try {
+      setSyncStatus('loading'); setSyncLabel('Syncing job data…');
+      const meta = { source: 'imported', filename, count, importedAt: new Date().toLocaleDateString('en-GB') };
+      await fetch('https://api.jsonbin.io/v3/b/' + jobsBinRef.current, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-Master-Key': MASTER_KEY },
+        body: JSON.stringify({ jobData: rows, jobMeta: meta })
+      });
+      setSyncStatus('ok'); setSyncLabel('Job data synced ✓');
+    } catch(e) { setSyncStatus('err'); setSyncLabel('Job data save failed'); }
+  }
+
+  function persistAll(nextNotes, nextAllocs) { saveToCloud(nextNotes, nextAllocs); }
+
+  async function loadFromAirtable() { await loadFromCloud(); }
+
+  async function loadAllocations() {}
+
+  async function saveAlloc(key, val) {
+    const next = { ...allocations };
+    if (val.trim()) next[key] = val.trim(); else delete next[key];
+    setAllocations(next);
+    await saveToCloud(notes, next);
+  }
+
+  function exportNotesCSV() {
+    const rows = [["Client Code","Job Type","Year End","Client Name","Note","Allocated To"]];
+    const allKeys = new Set([...Object.keys(notes), ...Object.keys(allocations)]);
+    allKeys.forEach(key => {
+      const [clientCode, jobType, peDate] = key.split("|");
+      const job = data.find(j => (j.Client||"")===clientCode && (j["Job Type"]||"")===jobType && (j["P/E Date"]||"")===peDate);
+      const name = job ? job.Name : "";
+      const note = (notes[key] || "").replace(/"/g, '""');
+      const alloc = (allocations[key] || "").replace(/"/g, '""');
+      if (note || alloc) rows.push([clientCode, jobType, peDate, name, note, alloc]);
+    });
+    const csv = rows.map(r => r.map(v => `"${v}"`).join(",")).join("\n");
+    const blob = new Blob([csv], { type: "text/csv" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a"); a.href = url;
+    a.download = `fs_notes_${new Date().toISOString().slice(0,10)}.csv`; a.click();
+    URL.revokeObjectURL(url);
+  }
+
+  function importNotesCSV(e) {
+    const file = e.target.files[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const lines = ev.target.result.split("\n").slice(1);
+        const newNotes = { ...notes };
+        const newAllocs = { ...allocations };
+        let count = 0;
+        lines.forEach(line => {
+          if (!line.trim()) return;
+          const vals = []; let cur = "", inQ = false;
+          for (let c of line) {
+            if (c === '"') { inQ = !inQ; }
+            else if (c === "," && !inQ) { vals.push(cur); cur = ""; }
+            else cur += c;
+          }
+          vals.push(cur);
+          const [clientCode, jobType, peDate, , note, alloc] = vals;
+          if (!clientCode || !jobType) return;
+          const key = `${clientCode}|${jobType}|${peDate}`;
+          if (note && note.trim()) { newNotes[key] = note.trim(); count++; }
+          if (alloc && alloc.trim()) { newAllocs[key] = alloc.trim(); count++; }
+        });
+        setNotes(newNotes);
+        setAllocations(newAllocs);
+        saveToCloud(newNotes, newAllocs);
+        setUploadMsg(`✓ Imported notes from ${file.name}`);
+        setTimeout(() => setUploadMsg(""), 4000);
+      } catch(err) { setUploadMsg("Error importing notes: " + err.message); }
+    };
+    reader.readAsText(file);
+    e.target.value = "";
+  }
+
+  function noteKey(job) {
+    return (job.Client || "") + "|" + (job["Job Type"] || "") + "|" + (job["P/E Date"] || "");
+  }
+
+  async function loadNotes() {
+    await loadFromAirtable();
+  }
+
+  async function saveNote(key, val) {
+    setNotesSaving(true);
+    const next = { ...notes };
+    if (val.trim()) next[key] = val.trim(); else delete next[key];
+    setNotes(next);
+    await saveToCloud(next, allocations);
+    setNotesSaving(false);
+  }
+
+  // Load notes + allocations from localStorage on mount
+  useEffect(() => {
+    loadFromAirtable();
+  }, []);
+
+  const notesCount = Object.keys(notes).length;
+  const [selectedStepRaw, setSelectedStepRaw] = useState(null);
+  const selectedStepState = [selectedStepRaw, (v) => setSelectedStepRaw(v)];
+
+  const partners = useMemo(() => {
+    const ps = new Set();
+    data.forEach(d => { if (d["Job Partner"]) ps.add(d["Job Partner"]); });
+    return [...ps].sort();
+  }, [data]);
+
+  const jobTypes = useMemo(() => {
+    const ts = new Set();
+    data.forEach(d => { if (d["Job Type"]) ts.add(d["Job Type"]); });
+    return [...ts].sort();
+  }, [data]);
+
+  // Stats for dashboard
+  const stats = useMemo(() => {
+    const today = TODAY;
+    let overdue = 0, dueSoon = 0, yearEndPassed = 0, complete = 0, inProgress = 0;
+    const byType = {};
+    const overdueJobs = [];
+    const dueSoonJobs = [];
+    const yearEndPassedJobs = [];
+
+    data.forEach(job => {
+      const type = job["Job Type"];
+      if (!byType[type]) byType[type] = { total: 0, complete: 0, pending: 0 };
+      byType[type].total++;
+
+      const dl = daysUntil(job["Stat. D/Line"]);
+      const pe = parseDate(job["P/E Date"]);
+      const done = isComplete(job);
+
+      if (done) {
+        complete++;
+        byType[type].complete++;
+      } else {
+        inProgress++;
+        byType[type].pending++;
+
+        if (dl !== null && dl < 0) {
+          overdue++;
+          overdueJobs.push(job);
+        } else if (dl !== null && dl <= 30) {
+          dueSoon++;
+          dueSoonJobs.push(job);
+        }
+
+        if (pe && pe < today) {
+          yearEndPassed++;
+          yearEndPassedJobs.push(job);
+        }
+      }
+    });
+
+    return { overdue, dueSoon, yearEndPassed, complete, inProgress, byType, overdueJobs, dueSoonJobs, yearEndPassedJobs };
+  }, [data]);
+
+  const filteredData = useMemo(() => {
+    let d = data;
+    if (filterType !== "all") d = d.filter(j => j["Job Type"] === filterType);
+    if (filterPartner !== "all") d = d.filter(j => j["Job Partner"] === filterPartner);
+    if (filterStatus === "overdue") d = d.filter(j => { const dl = daysUntil(j["Stat. D/Line"]); return !isComplete(j) && dl !== null && dl < 0; });
+    if (filterStatus === "due30") d = d.filter(j => { const dl = daysUntil(j["Stat. D/Line"]); return !isComplete(j) && dl !== null && dl >= 0 && dl <= 30; });
+    if (filterStatus === "yearend") d = d.filter(j => { const pe = parseDate(j["P/E Date"]); return !isComplete(j) && pe && pe < TODAY; });
+    if (filterStatus === "complete") d = d.filter(j => isComplete(j));
+    if (filterStatus === "inprogress") d = d.filter(j => !isComplete(j) && parseStatus(j.Status) > 0);
+    if (filterStatus === "pending") d = d.filter(j => parseStatus(j.Status) === 0 && !isComplete(j));
+    if (search.trim()) {
+      const s = search.toLowerCase();
+      d = d.filter(j => (j.Name || "").toLowerCase().includes(s) || (j.Client || "").toLowerCase().includes(s));
+    }
+    d = [...d].sort((a, b) => {
+      let av = a[sortField], bv = b[sortField];
+      if (sortField === "Stat. D/Line" || sortField === "P/E Date") {
+        av = parseDate(av) || new Date(9999, 0);
+        bv = parseDate(bv) || new Date(9999, 0);
+        return sortAsc ? av - bv : bv - av;
+      }
+      av = av || ""; bv = bv || "";
+      return sortAsc ? av.toString().localeCompare(bv.toString()) : bv.toString().localeCompare(av.toString());
+    });
+    return d;
+  }, [data, filterType, filterPartner, filterStatus, search, sortField, sortAsc]);
+
+  function handleFileUpload(e) {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const text = ev.target.result;
+        const lines = text.split("\n");
+        const headers = lines[0].split(",").map(h => h.trim().replace(/^"|"$/g, ""));
+        const rows = [];
+        for (let i = 1; i < lines.length; i++) {
+          const line = lines[i].trim();
+          if (!line) continue;
+          // Simple CSV parse
+          const vals = [];
+          let cur = "", inQ = false;
+          for (let c of line) {
+            if (c === "\"" ) { inQ = !inQ; }
+            else if (c === "," && !inQ) { vals.push(cur); cur = ""; }
+            else cur += c;
+          }
+          vals.push(cur);
+          const row = {};
+          headers.forEach((h, idx) => {
+            const v = (vals[idx] || "").trim().replace(/^"|"$/g, "");
+            row[h] = v || null;
+          });
+          if (row.Name) rows.push(row);
+        }
+        setData(rows);
+        // Persist to localStorage so data survives page reloads
+        try {
+          localStorage.setItem("fspm_jobdata_v1", JSON.stringify(rows));
+          const meta = { source: "imported", filename: file.name, count: rows.length, importedAt: new Date().toLocaleDateString("en-GB") };
+          localStorage.setItem("fspm_jobmeta_v1", JSON.stringify(meta));
+          setDataSource(meta);
+        } catch (e) {
+          console.warn("Could not persist job data:", e);
+        }
+        // Strip to only fields the app uses before pushing to cloud (keeps payload small)
+        const KEEP = ["Name","Client","Job Type","P/E Date","Stat. D/Line","Job Partner","Status"];
+        const slimRows = rows.map(r => { const o = {}; KEEP.forEach(k => { if (r[k] != null) o[k] = r[k]; }); return o; });
+        saveJobDataToCloud(slimRows, file.name, rows.length);
+        setUploadMsg("✓ Loaded " + rows.length + " jobs from " + file.name + " — syncing to shared store…");
+        setTimeout(() => setUploadMsg(""), 4000);
+      } catch (err) {
+        setUploadMsg("Error reading file: " + err.message);
+      }
+    };
+    reader.readAsText(file, "latin1");
+  }
+
+  function toggleSort(field) {
+    if (sortField === field) setSortAsc(a => !a);
+    else { setSortField(field); setSortAsc(true); }
+  }
+
+  const pct = (n, t) => t ? Math.round(n / t * 100) : 0;
+
+  if (notesLoading) return (
+    <div style={{ fontFamily: "'Inter', 'Segoe UI', sans-serif", background: "#f8fafc", minHeight: "100vh", display: "flex", alignItems: "center", justifyContent: "center", color: "#64748b", fontSize: 14 }}>
+      <div style={{ textAlign: "center" }}>
+        <div style={{ fontSize: 32, marginBottom: 12 }}>⟳</div>
+        <div style={{ fontWeight: 600, color: "#1e3a5f" }}>FS Accountants — Practice Manager</div>
+        <div style={{ marginTop: 6 }}>Loading…</div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div style={{ fontFamily: "'Inter', 'Segoe UI', sans-serif", background: "#f8fafc", minHeight: "100vh", color: "#1e293b" }}>
+      {/* Header */}
+      <div style={{ background: "#1e3a5f", color: "white", padding: "0 24px" }}>
+        <div style={{ maxWidth: 1400, margin: "0 auto", display: "flex", alignItems: "center", justifyContent: "space-between", height: 56 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <div style={{ fontWeight: 700, fontSize: 18, letterSpacing: "-0.3px" }}>FS Accountants</div>
+            <div style={{ color: "#94a3b8", fontSize: 13 }}>Practice Manager</div>
+          </div>
+          <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            {uploadMsg && <span style={{ fontSize: 12, color: "#86efac" }}>{uploadMsg}</span>}
+            <label style={{ background: "#2563eb", color: "white", padding: "6px 14px", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: "pointer", display: "flex", alignItems: "center", gap: 6 }}>
+              ↑ Import CSV
+              <input ref={fileInputRef} type="file" accept=".csv" style={{ display: "none" }} onChange={handleFileUpload} />
+            </label>
+            <div style={{ width: 1, height: 20, background: "#334155", margin: "0 4px" }} />
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <button onClick={exportNotesCSV}
+                style={{ background: notesCount > 0 ? "#0f766e" : "#334155", color: "white", padding: "6px 12px", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: "pointer", border: "none" }}>
+                ↓ Notes {notesCount > 0 ? `(${notesCount})` : ""}
+              </button>
+              <label style={{ background: "#334155", color: "white", padding: "6px 12px", borderRadius: 6, fontSize: 12, fontWeight: 600, cursor: "pointer" }}>
+                ↑ Notes
+                <input ref={noteInputRef} type="file" accept=".csv" style={{ display: "none" }} onChange={importNotesCSV} />
+              </label>
+              {notesSaving && <span style={{ color: "#fbbf24", fontSize: 12 }}>⟳ Saving…</span>}
+              <div style={{ display: "flex", alignItems: "center", gap: 5, padding: "4px 10px", borderRadius: 20, border: "1px solid #334155", fontSize: 11, color: "#94a3b8" }}>
+                <div style={{ width: 7, height: 7, borderRadius: "50%", background: syncStatus === "ok" ? "#22c55e" : syncStatus === "err" ? "#ef4444" : "#f59e0b", animation: syncStatus === "loading" ? "pulse 1s infinite" : "none" }}></div>
+                {syncLabel}
+                <span onClick={() => loadFromCloud()} style={{ cursor: "pointer", marginLeft: 2, opacity: 0.7 }} title="Refresh">⟳</span>
+              </div>
+            </div>
+            <div style={{ fontSize: 12, color: "#64748b", marginLeft: 8 }}>
+              {data.length} jobs
+              {dataSource && <span style={{ marginLeft: 4, color: dataSource.source === "imported" ? "#86efac" : "#f97316" }}
+                title={dataSource.source === "imported" ? `Imported: ${dataSource.filename} on ${dataSource.importedAt}` : "Using built-in data — import a fresh CSV from IRIS"}>
+                {dataSource.source === "imported" ? `· ${dataSource.importedAt}` : "· ⚠ built-in data"}
+              </span>}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Nav tabs */}
+      <div style={{ background: "white", borderBottom: "1px solid #e2e8f0", padding: "0 24px" }}>
+        <div style={{ maxWidth: 1400, margin: "0 auto", display: "flex", gap: 0 }}>
+          {[["dashboard", "Dashboard"], ["jobs", "All Jobs"], ["yearends", "Year Ends"], ["deadlines", "Deadlines"], ["bytype", "By Job Type"], ["help", "ℹ How to Use"]].map(([id, label]) => (
+            <button key={id} onClick={() => setActiveTab(id)} style={{
+              padding: "12px 18px", border: "none", background: "none", cursor: "pointer",
+              fontSize: 13, fontWeight: activeTab === id ? 600 : 400,
+              color: activeTab === id ? "#2563eb" : "#64748b",
+              borderBottom: activeTab === id ? "2px solid #2563eb" : "2px solid transparent",
+              transition: "all 0.15s"
+            }}>{label}</button>
+          ))}
+        </div>
+      </div>
+
+      <div style={{ maxWidth: 1400, margin: "0 auto", padding: "24px" }}>
+
+        {/* DASHBOARD */}
+        {activeTab === "dashboard" && (
+          <div>
+            {/* Alert cards */}
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 16, marginBottom: 24 }}>
+              {[
+                { label: "Overdue", val: stats.overdue, color: "#ef4444", bg: "#fef2f2", icon: "⚠", action: () => { setFilterStatus("overdue"); setActiveTab("jobs"); } },
+                { label: "Due in 30 days", val: stats.dueSoon, color: "#f97316", bg: "#fff7ed", icon: "⏰", action: () => { setFilterStatus("due30"); setActiveTab("jobs"); } },
+                { label: "Year End Passed (awaiting work)", val: stats.yearEndPassed, color: "#7c3aed", bg: "#faf5ff", icon: "📋", action: () => { setActiveTab("yearends"); } },
+                { label: "In Progress", val: stats.inProgress, color: "#2563eb", bg: "#eff6ff", icon: "🔄", action: () => { setFilterStatus("inprogress"); setActiveTab("jobs"); } },
+                { label: "Complete", val: stats.complete, color: "#059669", bg: "#f0fdf4", icon: "✓", action: () => { setFilterStatus("complete"); setActiveTab("jobs"); } },
+              ].map(c => (
+                <button key={c.label} onClick={c.action} style={{
+                  background: c.bg, border: "1px solid " + c.color + "33", borderRadius: 10,
+                  padding: "16px 20px", textAlign: "left", cursor: "pointer", transition: "transform 0.1s",
+                }}>
+                  <div style={{ fontSize: 22, marginBottom: 4 }}>{c.icon}</div>
+                  <div style={{ fontSize: 28, fontWeight: 700, color: c.color }}>{c.val}</div>
+                  <div style={{ fontSize: 12, color: "#64748b", marginTop: 2 }}>{c.label}</div>
+                </button>
+              ))}
+            </div>
+
+            {/* By job type breakdown */}
+            <div style={{ background: "white", borderRadius: 10, border: "1px solid #e2e8f0", padding: 20, marginBottom: 20 }}>
+              <h3 style={{ margin: "0 0 16px", fontSize: 14, fontWeight: 600, color: "#475569" }}>JOBS BY TYPE</h3>
+              <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))", gap: 12 }}>
+                {Object.entries(stats.byType).map(([type, counts]) => {
+                  const color = JOB_COLORS[type] || "#64748b";
+                  const completePct = pct(counts.complete, counts.total);
+                  return (
+                    <div key={type} style={{ border: "1px solid #e2e8f0", borderRadius: 8, padding: "12px 16px" }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <div style={{ width: 8, height: 8, borderRadius: "50%", background: color }} />
+                          <span style={{ fontWeight: 600, fontSize: 13 }}>{JOB_LABELS[type] || type}</span>
+                        </div>
+                        <span style={{ fontSize: 12, color: "#64748b" }}>{counts.total} total</span>
+                      </div>
+                      <div style={{ background: "#f1f5f9", borderRadius: 4, height: 6, marginBottom: 6 }}>
+                        <div style={{ background: color, height: 6, borderRadius: 4, width: completePct + "%" }} />
+                      </div>
+                      <div style={{ display: "flex", justifyContent: "space-between", fontSize: 11, color: "#94a3b8" }}>
+                        <span>{counts.complete} complete ({completePct}%)</span>
+                        <span>{counts.pending} pending</span>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Overdue list quick view */}
+            {stats.overdueJobs.length > 0 && (
+              <div style={{ background: "#fef2f2", border: "1px solid #fecaca", borderRadius: 10, padding: 20 }}>
+                <h3 style={{ margin: "0 0 12px", fontSize: 14, fontWeight: 600, color: "#dc2626" }}>⚠ OVERDUE JOBS ({stats.overdueJobs.length})</h3>
+                <div style={{ display: "grid", gap: 6 }}>
+                  {stats.overdueJobs.slice(0, 10).map((j, i) => {
+                    const days = daysUntil(j["Stat. D/Line"]);
+                    return (
+                      <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: "white", borderRadius: 6, padding: "8px 12px", fontSize: 13 }}>
+                        <div>
+                          <span style={{ fontWeight: 500 }}>{j.Name}</span>
+                          <span style={{ color: "#94a3b8", marginLeft: 8, fontSize: 11 }}>{JOB_LABELS[j["Job Type"]] || j["Job Type"]}</span>
+                        </div>
+                        <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                          <span style={{ color: "#64748b", fontSize: 12 }}>Deadline: {formatDate(j["Stat. D/Line"])}</span>
+                          <span style={{ color: "#dc2626", fontWeight: 600, fontSize: 12 }}>{Math.abs(days)}d overdue</span>
+                        </div>
+                      </div>
+                    );
+                  })}
+                  {stats.overdueJobs.length > 10 && (
+                    <button onClick={() => { setFilterStatus("overdue"); setActiveTab("jobs"); }} style={{ background: "none", border: "none", color: "#2563eb", cursor: "pointer", fontSize: 12, textAlign: "left", padding: "4px 0" }}>
+                      View all {stats.overdueJobs.length} overdue jobs →
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ALL JOBS */}
+        {activeTab === "jobs" && (
+          <div>
+            {/* Filters */}
+            <div style={{ background: "white", borderRadius: 10, border: "1px solid #e2e8f0", padding: 16, marginBottom: 16, display: "flex", flexWrap: "wrap", gap: 12, alignItems: "center" }}>
+              <input
+                placeholder="Search client name or code..."
+                value={search}
+                onChange={e => setSearch(e.target.value)}
+                style={{ padding: "8px 12px", border: "1px solid #e2e8f0", borderRadius: 6, fontSize: 13, minWidth: 220, outline: "none" }}
+              />
+              <select value={filterType} onChange={e => setFilterType(e.target.value)} style={{ padding: "8px 10px", border: "1px solid #e2e8f0", borderRadius: 6, fontSize: 13 }}>
+                <option value="all">All Job Types</option>
+                {jobTypes.map(t => <option key={t} value={t}>{JOB_LABELS[t] || t}</option>)}
+              </select>
+              <select value={filterPartner} onChange={e => setFilterPartner(e.target.value)} style={{ padding: "8px 10px", border: "1px solid #e2e8f0", borderRadius: 6, fontSize: 13 }}>
+                <option value="all">All Partners</option>
+                {partners.map(p => <option key={p} value={p}>{p}</option>)}
+              </select>
+              <select value={filterStatus} onChange={e => setFilterStatus(e.target.value)} style={{ padding: "8px 10px", border: "1px solid #e2e8f0", borderRadius: 6, fontSize: 13 }}>
+                <option value="all">All Statuses</option>
+                <option value="overdue">Overdue</option>
+                <option value="due30">Due in 30 days</option>
+                <option value="yearend">Year end passed</option>
+                <option value="pending">Pending (not started)</option>
+                <option value="inprogress">In Progress</option>
+                <option value="complete">Complete</option>
+              </select>
+              {(filterType !== "all" || filterPartner !== "all" || filterStatus !== "all" || search) && (
+                <button onClick={() => { setFilterType("all"); setFilterPartner("all"); setFilterStatus("all"); setSearch(""); }}
+                  style={{ background: "#f1f5f9", border: "1px solid #e2e8f0", borderRadius: 6, padding: "8px 12px", fontSize: 12, cursor: "pointer" }}>
+                  Clear filters
+                </button>
+              )}
+              <span style={{ marginLeft: "auto", color: "#64748b", fontSize: 12 }}>{filteredData.length} jobs</span>
+            </div>
+
+            {/* Table */}
+            <div style={{ background: "white", borderRadius: 10, border: "1px solid #e2e8f0", overflow: "hidden" }}>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                  <thead>
+                    <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
+                      {[["Name", "Client"], ["Job Type Desc", "Type"], ["Job Partner", "Partner"], ["P/E Date", "Year End"], ["Stat. D/Line", "Deadline"], ["Status", "Status"], ["_notes", "Notes"]].map(([f, label]) => (
+                        <th key={f} onClick={() => toggleSort(f)} style={{ padding: "10px 14px", textAlign: "left", fontWeight: 600, fontSize: 11, color: "#64748b", cursor: "pointer", userSelect: "none", whiteSpace: "nowrap" }}>
+                          {label} {sortField === f ? (sortAsc ? "↑" : "↓") : ""}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {filteredData.slice(0, 300).map((job, i) => {
+                      const days = daysUntil(job["Stat. D/Line"]);
+                      const dc = deadlineClass(days);
+                      const done = isComplete(job);
+                      const pe = parseDate(job["P/E Date"]);
+                      const yearEndPast = pe && pe < TODAY && !done;
+                      const color = JOB_COLORS[job["Job Type"]] || "#64748b";
+                      return (
+                        <tr key={i} style={{ borderBottom: "1px solid #f1f5f9", background: i % 2 === 0 ? "white" : "#fafafa" }}>
+                          <td style={{ padding: "10px 14px" }}>
+                            <div style={{ fontWeight: 500 }}>{job.Name}</div>
+                            <div style={{ fontSize: 11, color: "#94a3b8" }}>{job.Client}</div>
+                          </td>
+                          <td style={{ padding: "10px 14px" }}>
+                            <span style={{ background: color + "18", color: color, padding: "2px 8px", borderRadius: 12, fontSize: 11, fontWeight: 600 }}>
+                              {job["Job Type"]}
+                            </span>
+                          </td>
+                          <td style={{ padding: "10px 14px", color: "#475569" }}>{job["Job Partner"] || "—"}</td>
+                          <td style={{ padding: "10px 14px" }}>
+                            <span style={{ color: yearEndPast ? "#7c3aed" : "#475569", fontWeight: yearEndPast ? 600 : 400 }}>
+                              {formatDate(job["P/E Date"])} {yearEndPast ? "📋" : ""}
+                            </span>
+                          </td>
+                          <td style={{ padding: "10px 14px" }}>
+                            {done ? (
+                              <span style={{ color: "#059669", fontSize: 12 }}>Complete ✓</span>
+                            ) : (
+                              <span style={{ color: dc === "overdue" ? "#dc2626" : dc === "urgent" ? "#f97316" : dc === "warning" ? "#ca8a04" : "#475569", fontWeight: dc === "overdue" || dc === "urgent" ? 600 : 400, fontSize: 12 }}>
+                                {formatDate(job["Stat. D/Line"])}
+                                {days !== null && !done && (
+                                  <span style={{ marginLeft: 6, fontSize: 11 }}>
+                                    {days < 0 ? `(${Math.abs(days)}d over)` : `(${days}d)`}
+                                  </span>
+                                )}
+                              </span>
+                            )}
+                          </td>
+                          <td style={{ padding: "10px 14px" }}>
+                            <div style={{ fontSize: 12, color: "#475569" }}>{getStepLabel(job)}</div>
+                          </td>
+                          <td style={{ padding: "6px 10px", minWidth: 200 }}>
+                            {(() => {
+                              const key = noteKey(job);
+                              const isEditing = editingNote === key;
+                              const existing = notes[key] || "";
+                              if (isEditing) {
+                                return (
+                                  <div style={{ display: "flex", gap: 4, alignItems: "flex-start" }}>
+                                    <textarea
+                                      autoFocus
+                                      value={editingVal}
+                                      onChange={e => setEditingVal(e.target.value)}
+                                      onBlur={() => { saveNote(key, editingVal); setEditingNote(null); }}
+                                      onKeyDown={e => { if (e.key === "Escape") setEditingNote(null); if (e.key === "Enter" && !e.shiftKey) { saveNote(key, editingVal); setEditingNote(null); e.preventDefault(); } }}
+                                      style={{ width: "100%", minHeight: 56, fontSize: 12, border: "1px solid #2563eb", borderRadius: 5, padding: "4px 6px", resize: "vertical", outline: "none", fontFamily: "inherit" }}
+                                    />
+                                  </div>
+                                );
+                              }
+                              return (
+                                <div
+                                  onClick={() => { setEditingNote(key); setEditingVal(notes[key] || ""); }}
+                                  title="Click to add/edit note"
+                                  style={{ minHeight: 28, cursor: "text", fontSize: 12, color: existing ? "#1e293b" : "#cbd5e1", padding: "3px 6px", borderRadius: 5, border: "1px solid transparent", transition: "border 0.1s", lineHeight: 1.4 }}
+                                  onMouseEnter={e => e.currentTarget.style.borderColor = "#e2e8f0"}
+                                  onMouseLeave={e => e.currentTarget.style.borderColor = "transparent"}
+                                >
+                                  {existing || <span style={{ fontStyle: "italic" }}>Add note…</span>}
+                                  {existing && <span onClick={e => { e.stopPropagation(); saveNote(key, ""); }} title="Clear note" style={{ marginLeft: 6, color: "#94a3b8", fontSize: 11, cursor: "pointer" }}>✕</span>}
+                                </div>
+                              );
+                            })()}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              {filteredData.length > 300 && (
+                <div style={{ padding: "12px 16px", color: "#94a3b8", fontSize: 12, borderTop: "1px solid #e2e8f0" }}>
+                  Showing 300 of {filteredData.length} jobs. Use filters to narrow results.
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* YEAR ENDS TAB */}
+        {activeTab === "yearends" && (
+          <div>
+            <div style={{ background: "#faf5ff", border: "1px solid #e9d5ff", borderRadius: 10, padding: 16, marginBottom: 20 }}>
+              <h3 style={{ margin: 0, fontSize: 14, color: "#7c3aed" }}>📋 Year End Passed — Work Not Yet Complete</h3>
+              <p style={{ margin: "4px 0 0", fontSize: 12, color: "#64748b" }}>These clients have a year end that has already passed but the job is not yet marked complete. Use this to track who you need to chase for records.</p>
+            </div>
+
+            {/* Group by months past year end */}
+            {(() => {
+              const jobs = data.filter(j => {
+                const pe = parseDate(j["P/E Date"]);
+                return pe && pe < TODAY && !isComplete(j);
+              }).sort((a, b) => (parseDate(a["P/E Date"]) || 0) - (parseDate(b["P/E Date"]) || 0));
+
+              const groups = {};
+              jobs.forEach(j => {
+                const pe = parseDate(j["P/E Date"]);
+                const monthsAgo = Math.floor((TODAY - pe) / (1000 * 60 * 60 * 24 * 30));
+                let bucket;
+                if (monthsAgo > 12) bucket = "Over 12 months ago";
+                else if (monthsAgo > 6) bucket = "7–12 months ago";
+                else if (monthsAgo > 3) bucket = "4–6 months ago";
+                else if (monthsAgo > 1) bucket = "2–3 months ago";
+                else bucket = "Within last month";
+                if (!groups[bucket]) groups[bucket] = [];
+                groups[bucket].push(j);
+              });
+
+              const bucketOrder = ["Within last month", "2–3 months ago", "4–6 months ago", "7–12 months ago", "Over 12 months ago"];
+              const bucketColors = { "Within last month": "#2563eb", "2–3 months ago": "#7c3aed", "4–6 months ago": "#f97316", "7–12 months ago": "#dc2626", "Over 12 months ago": "#7f1d1d" };
+
+              return bucketOrder.filter(b => groups[b]).map(bucket => (
+                <div key={bucket} style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 10, marginBottom: 16, overflow: "hidden" }}>
+                  <div style={{ background: bucketColors[bucket] + "12", borderBottom: "1px solid #e2e8f0", padding: "10px 16px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                    <span style={{ fontWeight: 600, fontSize: 13, color: bucketColors[bucket] }}>{bucket}</span>
+                    <span style={{ fontSize: 12, color: "#64748b" }}>{groups[bucket].length} jobs</span>
+                  </div>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                    <tbody>
+                      {groups[bucket].map((j, i) => {
+                        const pe = parseDate(j["P/E Date"]);
+                        const dl = daysUntil(j["Stat. D/Line"]);
+                        return (
+                          <tr key={i} style={{ borderBottom: "1px solid #f1f5f9" }}>
+                            <td style={{ padding: "8px 16px", fontWeight: 500 }}>{j.Name}</td>
+                            <td style={{ padding: "8px 16px" }}>
+                              <span style={{ background: (JOB_COLORS[j["Job Type"]] || "#64748b") + "18", color: JOB_COLORS[j["Job Type"]] || "#64748b", padding: "2px 8px", borderRadius: 12, fontSize: 11, fontWeight: 600 }}>
+                                {j["Job Type"]}
+                              </span>
+                            </td>
+                            <td style={{ padding: "8px 16px", color: "#64748b", fontSize: 12 }}>Year end: {formatDate(j["P/E Date"])}</td>
+                            <td style={{ padding: "8px 16px", color: "#64748b", fontSize: 12 }}>Deadline: {formatDate(j["Stat. D/Line"])}</td>
+                            <td style={{ padding: "8px 16px", color: j["Job Partner"] ? "#475569" : "#94a3b8", fontSize: 12 }}>{j["Job Partner"] || "Unassigned"}</td>
+                            <td style={{ padding: "8px 16px", color: dl !== null && dl < 0 ? "#dc2626" : "#475569", fontSize: 12, fontWeight: dl !== null && dl < 0 ? 600 : 400 }}>
+                              {dl !== null && dl < 0 ? `⚠ ${Math.abs(dl)}d overdue` : dl !== null && dl <= 30 ? `⏰ ${dl}d left` : getStepLabel(j)}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              ));
+            })()}
+          </div>
+        )}
+
+        {/* DEADLINES TAB */}
+        {activeTab === "deadlines" && (
+          <div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 20 }}>
+              {/* Overdue */}
+              <div style={{ background: "white", border: "1px solid #fecaca", borderRadius: 10, overflow: "hidden" }}>
+                <div style={{ background: "#fef2f2", padding: "12px 16px", borderBottom: "1px solid #fecaca" }}>
+                  <div style={{ fontWeight: 600, color: "#dc2626", fontSize: 14 }}>⚠ Overdue ({stats.overdueJobs.length})</div>
+                </div>
+                <div style={{ maxHeight: 400, overflowY: "auto" }}>
+                  {stats.overdueJobs.sort((a, b) => (parseDate(a["Stat. D/Line"]) || 0) - (parseDate(b["Stat. D/Line"]) || 0)).map((j, i) => {
+                    const days = daysUntil(j["Stat. D/Line"]);
+                    return (
+                      <div key={i} style={{ padding: "10px 16px", borderBottom: "1px solid #f1f5f9", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <div>
+                          <div style={{ fontWeight: 500, fontSize: 13 }}>{j.Name}</div>
+                          <div style={{ fontSize: 11, color: "#94a3b8" }}>{JOB_LABELS[j["Job Type"]] || j["Job Type"]} · {j["Job Partner"]}</div>
+                        </div>
+                        <div style={{ textAlign: "right" }}>
+                          <div style={{ color: "#dc2626", fontWeight: 700, fontSize: 13 }}>{Math.abs(days)}d over</div>
+                          <div style={{ fontSize: 11, color: "#94a3b8" }}>{formatDate(j["Stat. D/Line"])}</div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+
+              {/* Due soon */}
+              <div style={{ background: "white", border: "1px solid #fed7aa", borderRadius: 10, overflow: "hidden" }}>
+                <div style={{ background: "#fff7ed", padding: "12px 16px", borderBottom: "1px solid #fed7aa" }}>
+                  <div style={{ fontWeight: 600, color: "#ea580c", fontSize: 14 }}>⏰ Due in 30 days ({stats.dueSoonJobs.length})</div>
+                </div>
+                <div style={{ maxHeight: 400, overflowY: "auto" }}>
+                  {stats.dueSoonJobs.sort((a, b) => (parseDate(a["Stat. D/Line"]) || 0) - (parseDate(b["Stat. D/Line"]) || 0)).map((j, i) => {
+                    const days = daysUntil(j["Stat. D/Line"]);
+                    return (
+                      <div key={i} style={{ padding: "10px 16px", borderBottom: "1px solid #f1f5f9", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <div>
+                          <div style={{ fontWeight: 500, fontSize: 13 }}>{j.Name}</div>
+                          <div style={{ fontSize: 11, color: "#94a3b8" }}>{JOB_LABELS[j["Job Type"]] || j["Job Type"]} · {j["Job Partner"]}</div>
+                        </div>
+                        <div style={{ textAlign: "right" }}>
+                          <div style={{ color: days <= 7 ? "#dc2626" : "#ea580c", fontWeight: 600, fontSize: 13 }}>{days}d left</div>
+                          <div style={{ fontSize: 11, color: "#94a3b8" }}>{formatDate(j["Stat. D/Line"])}</div>
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            </div>
+
+            {/* Next 3 months timeline */}
+            <div style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 10, padding: 20, marginTop: 20 }}>
+              <h3 style={{ margin: "0 0 16px", fontSize: 14, fontWeight: 600, color: "#475569" }}>UPCOMING DEADLINES — NEXT 90 DAYS</h3>
+              {(() => {
+                const upcoming = data.filter(j => {
+                  const dl = daysUntil(j["Stat. D/Line"]);
+                  return !isComplete(j) && dl !== null && dl >= 0 && dl <= 90;
+                }).sort((a, b) => (parseDate(a["Stat. D/Line"]) || 0) - (parseDate(b["Stat. D/Line"]) || 0));
+
+                const byMonth = {};
+                upcoming.forEach(j => {
+                  const d = parseDate(j["Stat. D/Line"]);
+                  const key = d.toLocaleDateString("en-GB", { month: "long", year: "numeric" });
+                  if (!byMonth[key]) byMonth[key] = [];
+                  byMonth[key].push(j);
+                });
+
+                return Object.entries(byMonth).map(([month, jobs]) => (
+                  <div key={month} style={{ marginBottom: 16 }}>
+                    <div style={{ fontWeight: 600, fontSize: 12, color: "#64748b", marginBottom: 8, textTransform: "uppercase", letterSpacing: "0.5px" }}>{month} — {jobs.length} jobs</div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                      {jobs.map((j, i) => {
+                        const color = JOB_COLORS[j["Job Type"]] || "#64748b";
+                        return (
+                          <div key={i} style={{ background: color + "12", border: "1px solid " + color + "30", borderRadius: 6, padding: "4px 10px", fontSize: 12 }}>
+                            <span style={{ fontWeight: 500 }}>{j.Name}</span>
+                            <span style={{ color: "#94a3b8", marginLeft: 6 }}>{j["Job Type"]}</span>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ));
+              })()}
+            </div>
+          </div>
+        )}
+
+        {/* BY JOB TYPE */}
+        {activeTab === "bytype" && (
+          <div>
+            {/* Job type selector */}
+            <div style={{ display: "flex", gap: 8, marginBottom: 20, flexWrap: "wrap" }}>
+              {Object.entries(JOB_LABELS).filter(([t]) => stats.byType[t]).map(([type, label]) => {
+                const color = JOB_COLORS[type] || "#64748b";
+                const counts = stats.byType[type] || {};
+                return (
+                  <button key={type} onClick={() => setSelectedJobType(type)}
+                    style={{ background: selectedJobType === type ? color : "white", color: selectedJobType === type ? "white" : "#475569",
+                      border: "2px solid " + color, borderRadius: 8, padding: "8px 16px", cursor: "pointer", fontSize: 13, fontWeight: 600, transition: "all 0.15s" }}>
+                    {label} <span style={{ fontWeight: 400, opacity: 0.8 }}>({counts.total || 0})</span>
+                  </button>
+                );
+              })}
+            </div>
+
+            {selectedJobType && (() => {
+              const type = selectedJobType;
+              const color = JOB_COLORS[type] || "#64748b";
+              const wf = WORKFLOW[type] || [];
+              const jobs = data.filter(j => j["Job Type"] === type);
+
+              // Count per step
+              const stepCounts = {};
+              jobs.forEach(j => {
+                const step = parseStatus(j.Status);
+                stepCounts[step] = (stepCounts[step] || 0) + 1;
+              });
+
+              // Jobs at each step for the detail panel
+              const [selectedStep, setSelectedStep] = selectedStepState;
+
+              const jobsAtStep = selectedStep !== null
+                ? jobs.filter(j => parseStatus(j.Status) === selectedStep)
+                : [];
+
+              return (
+                <div>
+                  {/* Pipeline visual */}
+                  <div style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 10, padding: 20, marginBottom: 16 }}>
+                    <div style={{ fontSize: 11, fontWeight: 600, color: "#94a3b8", marginBottom: 14, textTransform: "uppercase", letterSpacing: "0.5px" }}>
+                      {JOB_LABELS[type]} Pipeline — click a stage to see jobs
+                    </div>
+                    <div style={{ display: "flex", gap: 0, alignItems: "stretch", overflowX: "auto", paddingBottom: 4 }}>
+                      {wf.map((stage, idx) => {
+                        const cnt = stepCounts[stage.step] || 0;
+                        const isSelected = selectedStep === stage.step;
+                        const isLast = idx === wf.length - 1;
+                        return (
+                          <div key={stage.step} style={{ display: "flex", alignItems: "stretch", flex: "1 1 90px", minWidth: 80 }}>
+                            <button onClick={() => setSelectedStep(isSelected ? null : stage.step)}
+                              style={{ flex: 1, background: isSelected ? color : stage.complete ? "#f0fdf4" : cnt > 0 ? color + "12" : "#f8fafc",
+                                border: "2px solid " + (isSelected ? color : stage.complete ? "#bbf7d0" : cnt > 0 ? color + "50" : "#e2e8f0"),
+                                borderRadius: 8, padding: "10px 8px", cursor: "pointer", textAlign: "center", transition: "all 0.15s" }}>
+                              <div style={{ fontSize: 20, fontWeight: 700, color: isSelected ? "white" : stage.complete ? "#059669" : cnt > 0 ? color : "#cbd5e1" }}>
+                                {cnt}
+                              </div>
+                              <div style={{ fontSize: 10, color: isSelected ? "rgba(255,255,255,0.85)" : "#64748b", marginTop: 4, lineHeight: 1.3 }}>
+                                {stage.label}
+                              </div>
+                            </button>
+                            {!isLast && (
+                              <div style={{ display: "flex", alignItems: "center", color: "#cbd5e1", fontSize: 16, padding: "0 2px" }}>›</div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+
+                  {/* Jobs at selected step */}
+                  {selectedStep !== null && (
+                    <div style={{ background: "white", border: "1px solid " + color + "40", borderRadius: 10, overflow: "hidden" }}>
+                      <div style={{ background: color + "0f", borderBottom: "1px solid " + color + "30", padding: "12px 16px", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <span style={{ fontWeight: 600, fontSize: 14, color }}>
+                          {wf.find(s => s.step === selectedStep)?.label} — {jobsAtStep.length} jobs
+                        </span>
+                        <button onClick={() => setSelectedStep(null)} style={{ background: "none", border: "none", color: "#94a3b8", cursor: "pointer", fontSize: 18 }}>×</button>
+                      </div>
+                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                        <thead>
+                          <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
+                            <th style={{ padding: "8px 14px", textAlign: "left", fontWeight: 600, fontSize: 11, color: "#64748b" }}>Client</th>
+                            <th style={{ padding: "8px 14px", textAlign: "left", fontWeight: 600, fontSize: 11, color: "#64748b" }}>Year End</th>
+                            <th style={{ padding: "8px 14px", textAlign: "left", fontWeight: 600, fontSize: 11, color: "#64748b" }}>Deadline</th>
+                            <th style={{ padding: "8px 14px", textAlign: "left", fontWeight: 600, fontSize: 11, color: "#64748b" }}>Partner</th>
+                            <th style={{ padding: "8px 14px", textAlign: "left", fontWeight: 600, fontSize: 11, color: "#64748b" }}>Stage Updated</th>
+                            <th style={{ padding: "8px 14px", textAlign: "left", fontWeight: 600, fontSize: 11, color: "#64748b" }}>Allocated To</th>
+                            <th style={{ padding: "8px 14px", textAlign: "left", fontWeight: 600, fontSize: 11, color: "#64748b" }}>Notes</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {jobsAtStep.sort((a, b) => (parseDate(a["Stat. D/Line"]) || new Date(9999,0)) - (parseDate(b["Stat. D/Line"]) || new Date(9999,0))).map((j, i) => {
+                            const days = daysUntil(j["Stat. D/Line"]);
+                            const dc = deadlineClass(days);
+                            const statusDate = parseStatusDate(j.Status);
+                            const statusUser = parseStatusUser(j.Status);
+                            return (
+                              <tr key={i} style={{ borderBottom: "1px solid #f1f5f9", background: i % 2 === 0 ? "white" : "#fafafa" }}>
+                                <td style={{ padding: "9px 14px" }}>
+                                  <div style={{ fontWeight: 500 }}>{j.Name}</div>
+                                  <div style={{ fontSize: 11, color: "#94a3b8" }}>{j.Client}</div>
+                                </td>
+                                <td style={{ padding: "9px 14px", color: "#475569", fontSize: 12 }}>{formatDate(j["P/E Date"])}</td>
+                                <td style={{ padding: "9px 14px", fontSize: 12 }}>
+                                  <span style={{ color: dc === "overdue" ? "#dc2626" : dc === "urgent" ? "#f97316" : "#475569", fontWeight: dc === "overdue" || dc === "urgent" ? 600 : 400 }}>
+                                    {formatDate(j["Stat. D/Line"])}
+                                    {days !== null && <span style={{ marginLeft: 6, fontSize: 11, color: dc === "overdue" ? "#dc2626" : "#94a3b8" }}>
+                                      {days < 0 ? `(${Math.abs(days)}d over)` : `(${days}d)`}
+                                    </span>}
+                                  </span>
+                                </td>
+                                <td style={{ padding: "9px 14px", color: "#475569", fontSize: 12 }}>{j["Job Partner"] || "—"}</td>
+                                <td style={{ padding: "9px 14px", fontSize: 12, color: "#64748b" }}>
+                                  {statusDate ? <span>{statusDate} <span style={{ color: "#94a3b8" }}>{statusUser}</span></span> : <span style={{ color: "#cbd5e1" }}>—</span>}
+                                </td>
+                                <td style={{ padding: "6px 10px", minWidth: 130 }}>
+                                  {(() => {
+                                    const key = noteKey(j);
+                                    const isEditingA = editingAlloc === key;
+                                    const existing = allocations[key] || "";
+                                    if (isEditingA) return (
+                                      <input autoFocus value={editingAllocVal}
+                                        onChange={e => setEditingAllocVal(e.target.value)}
+                                        onBlur={() => { saveAlloc(key, editingAllocVal); setEditingAlloc(null); }}
+                                        onKeyDown={e => { if (e.key === "Enter" || e.key === "Escape") { if (e.key === "Enter") saveAlloc(key, editingAllocVal); setEditingAlloc(null); } }}
+                                        style={{ width: "100%", fontSize: 12, border: "1px solid #2563eb", borderRadius: 5, padding: "4px 8px", outline: "none", fontFamily: "inherit" }}
+                                      />
+                                    );
+                                    return (
+                                      <div onClick={() => { setEditingAlloc(key); setEditingAllocVal(existing); }}
+                                        style={{ minHeight: 26, cursor: "text", fontSize: 12, padding: "3px 6px", borderRadius: 5, border: "1px solid transparent", transition: "border 0.1s",
+                                          color: existing ? "#1e293b" : "#cbd5e1", fontStyle: existing ? "normal" : "italic" }}
+                                        onMouseEnter={e => e.currentTarget.style.borderColor = "#e2e8f0"}
+                                        onMouseLeave={e => e.currentTarget.style.borderColor = "transparent"}>
+                                        {existing || "Assign…"}
+                                        {existing && <span onClick={e => { e.stopPropagation(); saveAlloc(key, ""); }} style={{ marginLeft: 6, color: "#94a3b8", fontSize: 11, cursor: "pointer" }}>✕</span>}
+                                      </div>
+                                    );
+                                  })()}
+                                </td>
+                                <td style={{ padding: "6px 10px", minWidth: 150 }}>
+                                  {(() => {
+                                    const nk = noteKey(j);
+                                    const isEditingN = editingNote === nk;
+                                    const existingN = notes[nk] || "";
+                                    if (isEditingN) return (
+                                      <textarea autoFocus value={editingVal}
+                                        onChange={e => setEditingVal(e.target.value)}
+                                        onBlur={() => { saveNote(nk, editingVal); setEditingNote(null); }}
+                                        onKeyDown={e => { if (e.key === "Escape") setEditingNote(null); if (e.key === "Enter" && !e.shiftKey) { saveNote(nk, editingVal); setEditingNote(null); e.preventDefault(); } }}
+                                        style={{ width: "100%", fontSize: 12, border: "1px solid #2563eb", borderRadius: 5, padding: "4px 8px", outline: "none", fontFamily: "inherit", minHeight: 54, resize: "vertical" }}
+                                      />
+                                    );
+                                    return (
+                                      <div onClick={() => { setEditingNote(nk); setEditingVal(existingN); }}
+                                        style={{ minHeight: 26, cursor: "text", fontSize: 12, padding: "3px 6px", borderRadius: 5, border: "1px solid transparent", transition: "border 0.1s",
+                                          color: existingN ? "#1e293b" : "#cbd5e1", fontStyle: existingN ? "normal" : "italic", whiteSpace: "pre-wrap", maxWidth: 200 }}
+                                        onMouseEnter={e => e.currentTarget.style.borderColor = "#e2e8f0"}
+                                        onMouseLeave={e => e.currentTarget.style.borderColor = "transparent"}>
+                                        {existingN || "Add note…"}
+                                        {existingN && <span onClick={e => { e.stopPropagation(); saveNote(nk, ""); }} style={{ marginLeft: 6, color: "#94a3b8", fontSize: 11, cursor: "pointer" }}>✕</span>}
+                                      </div>
+                                    );
+                                  })()}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+
+                  {/* All jobs for this type if no step selected */}
+                  {selectedStep === null && (
+                    <div style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 10, overflow: "hidden" }}>
+                      <div style={{ padding: "12px 16px", borderBottom: "1px solid #e2e8f0", fontSize: 12, color: "#64748b" }}>
+                        All {jobs.length} {JOB_LABELS[type]} jobs — click a stage above to filter
+                      </div>
+                      <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                        <thead>
+                          <tr style={{ background: "#f8fafc", borderBottom: "1px solid #e2e8f0" }}>
+                            <th style={{ padding: "8px 14px", textAlign: "left", fontWeight: 600, fontSize: 11, color: "#64748b" }}>Client</th>
+                            <th style={{ padding: "8px 14px", textAlign: "left", fontWeight: 600, fontSize: 11, color: "#64748b" }}>Year End</th>
+                            <th style={{ padding: "8px 14px", textAlign: "left", fontWeight: 600, fontSize: 11, color: "#64748b" }}>Deadline</th>
+                            <th style={{ padding: "8px 14px", textAlign: "left", fontWeight: 600, fontSize: 11, color: "#64748b" }}>Partner</th>
+                            <th style={{ padding: "8px 14px", textAlign: "left", fontWeight: 600, fontSize: 11, color: "#64748b" }}>Current Stage</th>
+                            <th style={{ padding: "8px 14px", textAlign: "left", fontWeight: 600, fontSize: 11, color: "#64748b" }}>Allocated To</th>
+                            <th style={{ padding: "8px 14px", textAlign: "left", fontWeight: 600, fontSize: 11, color: "#64748b" }}>Notes</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {jobs.sort((a, b) => (parseDate(a["Stat. D/Line"]) || new Date(9999,0)) - (parseDate(b["Stat. D/Line"]) || new Date(9999,0))).map((j, i) => {
+                            const days = daysUntil(j["Stat. D/Line"]);
+                            const dc = deadlineClass(days);
+                            const step = parseStatus(j.Status);
+                            const wfEntry = wf.find(s => s.step === step);
+                            const statusDate = parseStatusDate(j.Status);
+                            const statusUser = parseStatusUser(j.Status);
+                            const progressPct = wf.length > 1 ? Math.round((wf.findIndex(s => s.step === step) / (wf.length - 1)) * 100) : 0;
+                            return (
+                              <tr key={i} style={{ borderBottom: "1px solid #f1f5f9", background: i % 2 === 0 ? "white" : "#fafafa" }}>
+                                <td style={{ padding: "9px 14px" }}>
+                                  <div style={{ fontWeight: 500 }}>{j.Name}</div>
+                                  <div style={{ fontSize: 11, color: "#94a3b8" }}>{j.Client}</div>
+                                </td>
+                                <td style={{ padding: "9px 14px", color: "#475569", fontSize: 12 }}>{formatDate(j["P/E Date"])}</td>
+                                <td style={{ padding: "9px 14px", fontSize: 12 }}>
+                                  <span style={{ color: dc === "overdue" ? "#dc2626" : dc === "urgent" ? "#f97316" : "#475569", fontWeight: dc === "overdue" || dc === "urgent" ? 600 : 400 }}>
+                                    {formatDate(j["Stat. D/Line"])}
+                                    {days !== null && <span style={{ marginLeft: 6, fontSize: 11 }}>
+                                      {days < 0 ? `(${Math.abs(days)}d over)` : `(${days}d)`}
+                                    </span>}
+                                  </span>
+                                </td>
+                                <td style={{ padding: "9px 14px", color: "#475569", fontSize: 12 }}>{j["Job Partner"] || "—"}</td>
+                                <td style={{ padding: "9px 14px" }}>
+                                  <div style={{ fontSize: 12, color: wfEntry?.complete ? "#059669" : "#475569", fontWeight: wfEntry?.complete ? 600 : 400 }}>
+                                    {wfEntry?.label || "Pending"}
+                                  </div>
+                                  {statusDate && <div style={{ fontSize: 11, color: "#94a3b8" }}>{statusDate} {statusUser}</div>}
+                                  <div style={{ background: "#f1f5f9", borderRadius: 2, height: 3, marginTop: 4, width: 80 }}>
+                                    <div style={{ background: wfEntry?.complete ? "#059669" : color, height: 3, borderRadius: 2, width: progressPct + "%" }} />
+                                  </div>
+                                </td>
+                                <td style={{ padding: "6px 10px", minWidth: 130 }}>
+                                  {(() => {
+                                    const key = noteKey(j);
+                                    const isEditingA = editingAlloc === key;
+                                    const existing = allocations[key] || "";
+                                    if (isEditingA) return (
+                                      <input autoFocus value={editingAllocVal}
+                                        onChange={e => setEditingAllocVal(e.target.value)}
+                                        onBlur={() => { saveAlloc(key, editingAllocVal); setEditingAlloc(null); }}
+                                        onKeyDown={e => { if (e.key === "Enter" || e.key === "Escape") { if (e.key === "Enter") saveAlloc(key, editingAllocVal); setEditingAlloc(null); } }}
+                                        style={{ width: "100%", fontSize: 12, border: "1px solid #2563eb", borderRadius: 5, padding: "4px 8px", outline: "none", fontFamily: "inherit" }}
+                                      />
+                                    );
+                                    return (
+                                      <div onClick={() => { setEditingAlloc(key); setEditingAllocVal(existing); }}
+                                        style={{ minHeight: 26, cursor: "text", fontSize: 12, padding: "3px 6px", borderRadius: 5, border: "1px solid transparent", transition: "border 0.1s",
+                                          color: existing ? "#1e293b" : "#cbd5e1", fontStyle: existing ? "normal" : "italic" }}
+                                        onMouseEnter={e => e.currentTarget.style.borderColor = "#e2e8f0"}
+                                        onMouseLeave={e => e.currentTarget.style.borderColor = "transparent"}>
+                                        {existing || "Assign…"}
+                                        {existing && <span onClick={e => { e.stopPropagation(); saveAlloc(key, ""); }} style={{ marginLeft: 6, color: "#94a3b8", fontSize: 11, cursor: "pointer" }}>✕</span>}
+                                      </div>
+                                    );
+                                  })()}
+                                </td>
+                                <td style={{ padding: "6px 10px", minWidth: 150 }}>
+                                  {(() => {
+                                    const nk = noteKey(j);
+                                    const isEditingN = editingNote === nk;
+                                    const existingN = notes[nk] || "";
+                                    if (isEditingN) return (
+                                      <textarea autoFocus value={editingVal}
+                                        onChange={e => setEditingVal(e.target.value)}
+                                        onBlur={() => { saveNote(nk, editingVal); setEditingNote(null); }}
+                                        onKeyDown={e => { if (e.key === "Escape") setEditingNote(null); if (e.key === "Enter" && !e.shiftKey) { saveNote(nk, editingVal); setEditingNote(null); e.preventDefault(); } }}
+                                        style={{ width: "100%", fontSize: 12, border: "1px solid #2563eb", borderRadius: 5, padding: "4px 8px", outline: "none", fontFamily: "inherit", minHeight: 54, resize: "vertical" }}
+                                      />
+                                    );
+                                    return (
+                                      <div onClick={() => { setEditingNote(nk); setEditingVal(existingN); }}
+                                        style={{ minHeight: 26, cursor: "text", fontSize: 12, padding: "3px 6px", borderRadius: 5, border: "1px solid transparent", transition: "border 0.1s",
+                                          color: existingN ? "#1e293b" : "#cbd5e1", fontStyle: existingN ? "normal" : "italic", whiteSpace: "pre-wrap", maxWidth: 200 }}
+                                        onMouseEnter={e => e.currentTarget.style.borderColor = "#e2e8f0"}
+                                        onMouseLeave={e => e.currentTarget.style.borderColor = "transparent"}>
+                                        {existingN || "Add note…"}
+                                        {existingN && <span onClick={e => { e.stopPropagation(); saveNote(nk, ""); }} style={{ marginLeft: 6, color: "#94a3b8", fontSize: 11, cursor: "pointer" }}>✕</span>}
+                                      </div>
+                                    );
+                                  })()}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                        </tbody>
+                      </table>
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+          </div>
+        )}
+
+        {/* HOW TO USE */}
+        {activeTab === "help" && (
+          <div style={{ maxWidth: 800 }}>
+
+            {/* Getting started */}
+            <div style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 10, padding: 24, marginBottom: 16 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
+                <div style={{ background: "#eff6ff", borderRadius: 8, padding: "8px 10px", fontSize: 20 }}>🚀</div>
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 15, color: "#1e293b" }}>Getting Started</div>
+                  <div style={{ fontSize: 12, color: "#64748b" }}>Setting up the app for your team</div>
+                </div>
+              </div>
+              {[
+                ["1", "Upload to Teams", "Go to your Teams channel → Files tab → Upload → select fs_practice_manager.html. Do this once — this becomes the master copy everyone downloads from."],
+                ["2", "Each team member downloads it", "In the Files tab, click the file → ⋯ (three dots) → Download. Open the downloaded file in Chrome or Edge. Do not try to open it directly from Teams — it must be downloaded first."],
+                ["3", "Import your IRIS data", "Click ↑ Import CSV in the top right and select your latest export from IRIS. This only needs doing on your own machine — others import their own copy when needed."],
+              ].map(([num, title, desc]) => (
+                <div key={num} style={{ display: "flex", gap: 14, marginBottom: 14, paddingBottom: 14, borderBottom: "1px solid #f1f5f9" }}>
+                  <div style={{ background: "#2563eb", color: "white", borderRadius: "50%", width: 26, height: 26, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, flexShrink: 0, marginTop: 2 }}>{num}</div>
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: 13, color: "#1e293b", marginBottom: 3 }}>{title}</div>
+                    <div style={{ fontSize: 13, color: "#475569", lineHeight: 1.6 }}>{desc}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Updating IRIS data */}
+            <div style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 10, padding: 24, marginBottom: 16 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
+                <div style={{ background: "#f0fdf4", borderRadius: 8, padding: "8px 10px", fontSize: 20 }}>📥</div>
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 15, color: "#1e293b" }}>Refreshing Job Data from IRIS</div>
+                  <div style={{ fontSize: 12, color: "#64748b" }}>Do this weekly or whenever you need up-to-date stages</div>
+                </div>
+              </div>
+              {[
+                ["1", "Export from IRIS", "Run your usual job export from IRIS and save the CSV file."],
+                ["2", "Import into the app", "Click ↑ Import CSV (top right of this app). Select the CSV — the job data updates instantly. Your notes and allocations are unaffected."],
+                ["3", "Your data persists", "The app remembers the last CSV you imported — reloading the page will not lose it. The import date shown next to the job count confirms which export is loaded."],
+              ].map(([num, title, desc]) => (
+                <div key={num} style={{ display: "flex", gap: 14, marginBottom: 14, paddingBottom: 14, borderBottom: "1px solid #f1f5f9" }}>
+                  <div style={{ background: "#059669", color: "white", borderRadius: "50%", width: 26, height: 26, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, flexShrink: 0, marginTop: 2 }}>{num}</div>
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: 13, color: "#1e293b", marginBottom: 3 }}>{title}</div>
+                    <div style={{ fontSize: 13, color: "#475569", lineHeight: 1.6 }}>{desc}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Sharing notes */}
+            <div style={{ background: "white", border: "1px solid #e2e8f0", borderRadius: 10, padding: 24, marginBottom: 16 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 16 }}>
+                <div style={{ background: "#faf5ff", borderRadius: 8, padding: "8px 10px", fontSize: 20 }}>📝</div>
+                <div>
+                  <div style={{ fontWeight: 700, fontSize: 15, color: "#1e293b" }}>Sharing Notes & Allocations with the Team</div>
+                  <div style={{ fontSize: 12, color: "#64748b" }}>Notes save on your device — use this workflow to keep everyone in sync</div>
+                </div>
+              </div>
+              {[
+                ["1", "Add your notes", "In the All Jobs tab, click any cell in the Notes column to add an action for admin. In By Job Type, use the Allocated To column to assign jobs to team members."],
+                ["2", "Export your notes", "Click ↓ Notes (top right). This downloads a CSV called fs_notes_[date].csv containing all your notes and allocations."],
+                ["3", "Upload to Teams", "Go to your Teams channel Files tab. Upload the CSV — name it fs_notes_latest.csv so it's easy to find. Replace the old one each time."],
+                ["4", "Team members import it", "Others click ↑ Notes in the app and select the CSV downloaded from Teams. Their notes merge with yours — nothing gets overwritten."],
+              ].map(([num, title, desc]) => (
+                <div key={num} style={{ display: "flex", gap: 14, marginBottom: 14, paddingBottom: 14, borderBottom: "1px solid #f1f5f9" }}>
+                  <div style={{ background: "#7c3aed", color: "white", borderRadius: "50%", width: 26, height: 26, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, flexShrink: 0, marginTop: 2 }}>{num}</div>
+                  <div>
+                    <div style={{ fontWeight: 600, fontSize: 13, color: "#1e293b", marginBottom: 3 }}>{title}</div>
+                    <div style={{ fontSize: 13, color: "#475569", lineHeight: 1.6 }}>{desc}</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Quick reference */}
+            <div style={{ background: "#f8fafc", border: "1px solid #e2e8f0", borderRadius: 10, padding: 20 }}>
+              <div style={{ fontWeight: 700, fontSize: 13, color: "#475569", marginBottom: 12, textTransform: "uppercase", letterSpacing: "0.5px" }}>Quick Reference — Header Buttons</div>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+                {[
+                  ["↑ Import CSV", "#2563eb", "Load a fresh IRIS export. Updates job data only — notes are unaffected."],
+                  ["↓ Notes (n)", "#0f766e", "Export all notes and allocations as a CSV to share with the team."],
+                  ["↑ Notes", "#334155", "Import a notes CSV from a colleague. Merges with your existing notes."],
+                  ["⚠ built-in data", "#f97316", "Warning shown when no IRIS CSV has been imported yet. Import one to clear it."],
+                ].map(([btn, color, desc]) => (
+                  <div key={btn} style={{ display: "flex", gap: 10, alignItems: "flex-start" }}>
+                    <div style={{ background: color, color: "white", padding: "3px 10px", borderRadius: 5, fontSize: 11, fontWeight: 600, whiteSpace: "nowrap", flexShrink: 0 }}>{btn}</div>
+                    <div style={{ fontSize: 12, color: "#64748b", lineHeight: 1.5 }}>{desc}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+          </div>
+        )}
+
+      </div>
+    </div>
+  );
+}
+
+
+const root = ReactDOM.createRoot(document.getElementById("root"));
+root.render(<App />);
+
+  </script>
+</body>
+</html>
